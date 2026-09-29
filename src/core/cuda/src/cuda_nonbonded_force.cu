@@ -67,7 +67,8 @@ __device__ void compute_pair(
 }
 
 __device__ void shuffle(int& atom, uint8_t& atom_type, int& atom_state, real_t& atom_charge, vdw_atom_param_t& atom_vdw, real_t& atom_lambda, real_t3& atom_force, real_t3& atom_coord) {
-    constexpr unsigned FULL_MASK = 0xFFFFFFFF;
+    //constexpr unsigned FULL_MASK = 0xFFFFFFFF;
+    long long unsigned FULL_MASK = -1u;
     int src = ((threadIdx.x & 31) + 1) & 31;
     atom = __shfl_sync(FULL_MASK, atom, src);
     int tmp = atom_type;
@@ -152,8 +153,10 @@ __global__ void nonbonded_kernel(
     const int tile = blockIdx.x * warps_per_block + warp_in_block;
     if (tile >= total_tiles) return;
 
-    auto [tile_x, tile_y] = get_tile_idx(block_num, tile);
+    auto tiles = get_tile_idx(block_num, tile);
 
+    auto tile_x = tiles.x;
+    auto tile_y = tiles.y;
     const int base_x = tile_x << 5;
     const int base_y = tile_y << 5;
 
@@ -204,7 +207,8 @@ __global__ void nonbonded_kernel(
         atomic_add_force(&dvelocities[atom2].y, atom2_force.y);
         atomic_add_force(&dvelocities[atom2].z, atom2_force.z);
     }
-    const unsigned mask = 0xffffffffu;
+    //const unsigned mask = 0xffffffffu;
+    long long unsigned mask = 0xffffffffu;
     for (int offset = 16; offset > 0; offset >>= 1) {
         local_e_coul += __shfl_down_sync(mask, local_e_coul, offset);
         local_e_vdw += __shfl_down_sync(mask, local_e_vdw, offset);

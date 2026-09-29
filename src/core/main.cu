@@ -3,6 +3,7 @@
 
 #include <memory>
 
+#include "cuda/include/gpu_interface.h"
 #include "command_parser.h"
 #include "context.h"
 #include "cpu_handler.h"

@@ -1,6 +1,13 @@
 #pragma once
 
-#include <cuda_runtime.h>
+#ifdef Q_USE_CUDA
+	#include <cuda_runtime.h>
+#endif
+
+#ifdef Q_USE_HIP
+	#include <hip/hip_runtime.h>
+#endif
+
 #include <type_traits>
 
 #include "precision.h"

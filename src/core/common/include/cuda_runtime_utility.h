@@ -2,14 +2,18 @@
 
 #include <cstdio>
 #include <cstdlib>
+
+#ifdef Q_USE_CUDA
 #include <cuda_runtime.h>
-#ifdef __CUDACC__
 #define HD __host__ __device__
-
-#else
-
-#define HD
 #endif
+
+#ifdef Q_USE_HIP
+#include <hip/hip_runtime.h>
+#define HD __host__ __device__
+#endif
+
+#include "../../cuda/include/gpu_interface.h"
 
 inline void check_cuda(cudaError_t status) {
     if (status != cudaSuccess) {

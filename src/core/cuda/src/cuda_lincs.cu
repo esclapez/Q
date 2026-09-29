@@ -1,4 +1,10 @@
+#ifdef Q_USE_CUDA
 #include <cooperative_groups.h>
+#endif
+
+#ifdef Q_USE_HIP
+#include <hip/hip_cooperative_groups.h>
+#endif
 
 #include <queue>
 #include <stdexcept>
