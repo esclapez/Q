@@ -1,24 +1,38 @@
 #include "cuda_force_accumulation.cuh"
 #include "cuda_nonbonded_force.cuh"
 
+#ifdef QGPU_BACKEND_CUDA
+#define NB_BLOCK_SIZE 32
+#define NB_BLOCK_SIZE_M1 31
+#define NB_BLOCK_SIZE_HALF 16
+#define NB_BLOCK_SIZE_POWER 5
+#endif
+
+#ifdef QGPU_BACKEND_HIP
+#define NB_BLOCK_SIZE 64
+#define NB_BLOCK_SIZE_M1 63
+#define NB_BLOCK_SIZE_HALF 32
+#define NB_BLOCK_SIZE_POWER 6
+#endif
+
 namespace {
 template <typename T>
 __device__ __forceinline__
-T shfl32(T value, int src_lane) {
+T shfl(T value, int src_lane) {
 #if defined(QGPU_BACKEND_HIP)
-    return __shfl(value, src_lane, 32);
+    return __shfl(value, src_lane, NB_BLOCK_SIZE);
 #else
-    return __shfl_sync(0xffffffffu, value, src_lane, 32);
+    return __shfl_sync(0xffffffffu, value, src_lane, NB_BLOCK_SIZE);
 #endif
 }
 
 template <typename T>
 __device__ __forceinline__
-T shfl_down32(T value, unsigned delta) {
+T shfl_down(T value, unsigned delta) {
 #if defined(QGPU_BACKEND_HIP)
-    return __shfl_down(value, delta, 32);
+    return __shfl_down(value, delta, NB_BLOCK_SIZE);
 #else
-    return __shfl_down_sync(0xffffffffu, value, delta, 32);
+    return __shfl_down_sync(0xffffffffu, value, delta, NB_BLOCK_SIZE);
 #endif
 }
 
@@ -47,19 +61,20 @@ __device__ void compute_pair(
     // output
     real_t3& atom1_force, real_t3& atom2_force,
     real_t& e_coul, real_t& e_vdw) {
+
     if (atom1 == -1 || atom2 == -1 || atom1 == atom2) return;
-    auto bond_type = get_bond_type(n_atoms_solute, LJ_matrix, atom1, atom1_type, atom2, atom2_type);
-    if (bond_type == BondType::Bond23) return;
 
     constexpr uint8_t Q = static_cast<uint8_t>(AtomCategory::Q);
     if (atom1_type == Q && atom2_type == Q && atom1_state != atom2_state) return;
+
+    auto bond_type = get_bond_type(n_atoms_solute, LJ_matrix, atom1, atom1_type, atom2, atom2_type);
+    if (bond_type == BondType::Bond23) return;
 
     real_t dx = atom2_coord.x - atom1_coord.x;
     real_t dy = atom2_coord.y - atom1_coord.y;
     real_t dz = atom2_coord.z - atom1_coord.z;
     real_t dis2 = dx * dx + dy * dy + dz * dz;
-    real_t inv_dis2 = static_cast<real_t>(1.0) / dis2;
-    real_t inv_dis = sqrt(inv_dis2);
+    real_t inv_dis = static_cast<real_t>(1.0) / sqrt(dis2);
 
     bool is_14 = (bond_type == BondType::Bond14);
     real_t qij = atom1_charge * atom2_charge;
@@ -86,21 +101,21 @@ __device__ void compute_pair(
 }
 
 __device__ void shuffle(int& atom, real_t& atom_charge, vdw_atom_param_t& atom_vdw, real_t3& atom_force, real_t3& atom_coord) {
-    int src = ((threadIdx.x & 31) + 1) & 31;
-    atom = shfl32(atom, src);
-    atom_charge = shfl32(atom_charge, src);
+    int src = ((threadIdx.x & NB_BLOCK_SIZE_M1) + 1) & NB_BLOCK_SIZE_M1;
+    atom = shfl(atom, src);
+    atom_charge = shfl(atom_charge, src);
 
-    atom_vdw.aii_normal = shfl32(atom_vdw.aii_normal, src);
-    atom_vdw.bii_normal = shfl32(atom_vdw.bii_normal, src);
-    atom_vdw.aii_14 = shfl32(atom_vdw.aii_14, src);
-    atom_vdw.bii_14 = shfl32(atom_vdw.bii_14, src);
+    atom_vdw.aii_normal = shfl(atom_vdw.aii_normal, src);
+    atom_vdw.bii_normal = shfl(atom_vdw.bii_normal, src);
+    atom_vdw.aii_14 = shfl(atom_vdw.aii_14, src);
+    atom_vdw.bii_14 = shfl(atom_vdw.bii_14, src);
 
-    atom_force.x = shfl32(atom_force.x, src);
-    atom_force.y = shfl32(atom_force.y, src);
-    atom_force.z = shfl32(atom_force.z, src);
-    atom_coord.x = shfl32(atom_coord.x, src);
-    atom_coord.y = shfl32(atom_coord.y, src);
-    atom_coord.z = shfl32(atom_coord.z, src);
+    atom_force.x = shfl(atom_force.x, src);
+    atom_force.y = shfl(atom_force.y, src);
+    atom_force.z = shfl(atom_force.z, src);
+    atom_coord.x = shfl(atom_coord.x, src);
+    atom_coord.y = shfl(atom_coord.y, src);
+    atom_coord.z = shfl(atom_coord.z, src);
 }
 
 __global__ void update_nonbonded_coords_kernel(
@@ -156,12 +171,12 @@ __global__ void nonbonded_kernel(
 
     // ---- energy accumulators  ----
     energy_accum_t* e) {
-    const int block_num = (sz + 31) >> 5;
+    const int block_num = (sz + NB_BLOCK_SIZE_M1) >> NB_BLOCK_SIZE_POWER;
     const int total_tiles = (block_num * (block_num + 1)) >> 1;
-    const int warps_per_block = blockDim.x >> 5;
+    const int warps_per_block = blockDim.x >> NB_BLOCK_SIZE_POWER;
     const int tid = threadIdx.x;
-    const int lane = tid & 31;
-    const int warp_in_block = tid >> 5;
+    const int lane = tid & NB_BLOCK_SIZE_M1;
+    const int warp_in_block = tid >> NB_BLOCK_SIZE_POWER;
 
     const int tile = blockIdx.x * warps_per_block + warp_in_block;
     if (tile >= total_tiles) return;
@@ -170,8 +185,8 @@ __global__ void nonbonded_kernel(
     const int tile_x = tile_idx.x;
     const int tile_y = tile_idx.y;
 
-    const int base_x = tile_x << 5;
-    const int base_y = tile_y << 5;
+    const int base_x = tile_x << NB_BLOCK_SIZE_POWER;
+    const int base_y = tile_y << NB_BLOCK_SIZE_POWER;
 
     int x_idx = base_x + lane;
     int y_idx = base_y + lane;
@@ -198,7 +213,7 @@ __global__ void nonbonded_kernel(
 
     real_t local_e_coul = 0, local_e_vdw = 0;
     bool is_diag = (tile_x == tile_y);
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < NB_BLOCK_SIZE; i++) {
         if (!is_diag || atom1 < atom2) {
             compute_pair(atom1, atom1_type, atom1_state, atom1_charge, atom1_vdw, atom1_lambda, atom1_coord,
                          atom2, tile_y_type, tile_y_state, atom2_charge, atom2_vdw, tile_y_lambda, atom2_coord,
@@ -221,9 +236,9 @@ __global__ void nonbonded_kernel(
         atomic_add_force(&dvelocities[atom2].y, atom2_force.y);
         atomic_add_force(&dvelocities[atom2].z, atom2_force.z);
     }
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        local_e_coul += shfl_down32(local_e_coul, offset);
-        local_e_vdw += shfl_down32(local_e_vdw, offset);
+    for (int offset = NB_BLOCK_SIZE_HALF; offset > 0; offset >>= 1) {
+        local_e_coul += shfl_down(local_e_coul, offset);
+        local_e_vdw += shfl_down(local_e_vdw, offset);
     }
 
     if (lane == 0) {
@@ -251,9 +266,9 @@ void CudaNonbondedForce::calc(Context& ctx) {
     Do calculation
     */
     const int thread_num = 256;
-    int tile_num_per_block = thread_num >> 5;
+    int tile_num_per_block = thread_num >> NB_BLOCK_SIZE_POWER;
     int n_atom = data_.n_total;
-    int block_num = (n_atom + 31) >> 5;
+    int block_num = (n_atom + NB_BLOCK_SIZE_M1) >> NB_BLOCK_SIZE_POWER;
     int total_tiles = block_num * (block_num + 1) >> 1;
     int grid_sz = (total_tiles + tile_num_per_block - 1) / tile_num_per_block;
 
